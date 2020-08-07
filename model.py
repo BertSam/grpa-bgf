@@ -7,20 +7,29 @@ from torch.nn import init
 
 import numpy as np
 
+import librosa
+import math
+import scipy
+from scipy.signal import lfilter
+#import matplotlib.pyplot as plt
+from spectrum import poly2lsf, lsf2poly
+import pyworld as pw
+
 
 class SampleRNN(torch.nn.Module):
 
-    def __init__(self, frame_sizes, n_rnn, dim, learn_h0, q_levels,
+    def __init__(self, frame_sizes, n_rnn, dim, learn_h0, q_levels, M,
                  weight_norm):
         super().__init__()
 
         self.dim = dim
         self.q_levels = q_levels
+        self.M = M
 
         ns_frame_samples = map(int, np.cumprod(frame_sizes))
         self.frame_level_rnns = torch.nn.ModuleList([
             FrameLevelRNN(
-                frame_size, n_frame_samples, n_rnn, dim, learn_h0, weight_norm
+                frame_size, n_frame_samples, n_rnn, dim, M, learn_h0, weight_norm
             )
             for (frame_size, n_frame_samples) in zip(
                 frame_sizes, ns_frame_samples
@@ -38,20 +47,21 @@ class SampleRNN(torch.nn.Module):
 
 class FrameLevelRNN(torch.nn.Module):
 
-    def __init__(self, frame_size, n_frame_samples, n_rnn, dim,
+    def __init__(self, frame_size, n_frame_samples, n_rnn, dim, M,
                  learn_h0, weight_norm):
         super().__init__()
 
         self.frame_size = frame_size
         self.n_frame_samples = n_frame_samples
         self.dim = dim
+        self.M = M
 
         h0 = torch.zeros(n_rnn, dim)
         if learn_h0:
             self.h0 = torch.nn.Parameter(h0)
         else:
             #self.register_buffer('h0', torch.autograd.Variable(h0))
-            with torch.no_grad:
+            with torch.no_grad: # according to user warning (BGF 2020)
                 self.register_buffer('h0', h0)
 
         self.input_expand = torch.nn.Conv1d(
@@ -65,6 +75,21 @@ class FrameLevelRNN(torch.nn.Module):
         #init.constant(self.input_expand.bias, 
         if weight_norm:
             self.input_expand = torch.nn.utils.weight_norm(self.input_expand)
+
+
+        #################
+        self.cond_expand = torch.nn.Conv1d(
+            in_channels=M,
+            out_channels=dim,
+            kernel_size=1
+        )
+        init.kaiming_uniform_(self.cond_expand.weight) # according to user warning (BGF 2020)
+        #init.kaiming_uniform(self.cond_expand.weight) 
+        init.constant_(self.cond_expand.bias, 0) # according to user warning (BGF 2020)
+        #init.constant(self.cond_expand.bias, 
+        if weight_norm:
+            self.cond_expand = torch.nn.utils.weight_norm(self.cond_expand)
+        ################
 
         self.rnn = torch.nn.GRU(
             input_size=dim,
@@ -90,6 +115,7 @@ class FrameLevelRNN(torch.nn.Module):
             out_channels=dim,
             kernel_size=frame_size
         )
+
         init.uniform_(
             self.upsampling.conv_t.weight, -np.sqrt(6 / dim), np.sqrt(6 / dim)
         )
@@ -99,14 +125,24 @@ class FrameLevelRNN(torch.nn.Module):
                 self.upsampling.conv_t
             )
 
-    def forward(self, prev_samples, upper_tier_conditioning, hidden):
+    def forward(self, prev_samples, hf, upper_tier_conditioning, hidden):
         (batch_size, _, _) = prev_samples.size()
+
 
         input = self.input_expand(
           prev_samples.permute(0, 2, 1)
         ).permute(0, 2, 1)
+
+        ##################
+        input_cond = self.cond_expand(
+          hf.permute(0, 2, 1)
+        ).permute(0, 2, 1)
+        ##################
+
         if upper_tier_conditioning is not None:
             input += upper_tier_conditioning
+        
+        input += input_cond
 
         reset = hidden is None
 
@@ -121,6 +157,7 @@ class FrameLevelRNN(torch.nn.Module):
         output = self.upsampling(
             output.permute(0, 2, 1)
         ).permute(0, 2, 1)
+
         return (output, hidden)
 
 
@@ -183,7 +220,7 @@ class SampleLevelMLP(torch.nn.Module):
         x = self.output(x).permute(0, 2, 1).contiguous()
 
         return F.log_softmax(x.view(-1, self.q_levels), dim=1) \
-                .view(batch_size, -1, self.q_levels)
+                .view(batch_size, -1, self.q_levels) ##### VÉRIFIER dim ##### IMPORTANT !!!
 
 
 class Runner:
@@ -196,9 +233,9 @@ class Runner:
     def reset_hidden_states(self):
         self.hidden_states = {rnn: None for rnn in self.model.frame_level_rnns}
 
-    def run_rnn(self, rnn, prev_samples, upper_tier_conditioning):
+    def run_rnn(self, rnn, prev_samples, hf, upper_tier_conditioning):
         (output, new_hidden) = rnn(
-            prev_samples, upper_tier_conditioning, self.hidden_states[rnn]
+            prev_samples, hf, upper_tier_conditioning, self.hidden_states[rnn]
         )
         self.hidden_states[rnn] = new_hidden.detach()
         return output
@@ -214,7 +251,6 @@ class Predictor(Runner, torch.nn.Module):
             self.reset_hidden_states()
 
         (batch_size, _) = input_sequences.size()
-
         upper_tier_conditioning = None
         for rnn in reversed(self.model.frame_level_rnns):
             from_index = self.model.lookback - rnn.n_frame_samples
@@ -227,8 +263,62 @@ class Predictor(Runner, torch.nn.Module):
                 batch_size, -1, rnn.n_frame_samples
             )
 
+            if upper_tier_conditioning == None:
+                [N, C, L] = prev_samples.size()
+                hf = torch.zeros([N, C, self.model.M]) # + 1 (for the rms nrj)
+
+                for batch_ind in range(N):
+                    for frame_ind in range(C):
+                        temp_seq = prev_samples[batch_ind, frame_ind, :].cpu().numpy()
+
+                        # Calculs lsf
+                        # Calcul du bruit blanc gaussien à ajouter au signal pour éviter "ill-conditioned" matrix
+                        # rms = np.sqrt(np.mean(temp_seq**2))
+                        # print(rms)
+                        # n_next = 1
+                        # if rms == 0:
+                        #     while rms == 0:
+                        #         temp_seq = prev_samples[batch_ind, frame_ind+n_next, :].cpu().numpy()
+                        #         rms = np.sqrt(np.mean(temp_seq**2))
+                        #         n_next += 1
+                        #         print("flag")
+
+                        rms = 0.1
+                        var = rms * 0.0001 # (-40db)
+                        std = math.sqrt(var)
+                        mu, sigma = 0, std # mean = 0 and standard deviation
+
+                        temp_seq = temp_seq + np.random.normal(mu, sigma, L)
+                    
+                        # hanning windowing
+                        temp_seq = temp_seq*np.hanning(L)
+
+                        a = librosa.core.lpc(temp_seq, self.model.M-1)
+                        lsf = torch.from_numpy(np.asarray(poly2lsf(a)))
+
+                        # Calculs nrj
+                        residu = lfilter(a, 1, temp_seq)
+                        nrjRMS_residu = torch.from_numpy(np.asarray(np.sqrt(np.mean(residu**2))))
+
+                        # print(lsf)
+                        # print(nrjRMS_residu)
+
+                        hf[batch_ind, frame_ind, :-1] = lsf
+                        hf[batch_ind, frame_ind, -1] = nrjRMS_residu
+                        # print(hf[0, 0, :])
+                        # exit()
+
+                hf = hf.cuda()
+                # import sys
+                # torch.set_printoptions(threshold=sys.maxsize)
+                # print(hf)
+                # exit()
+
+            
+            hf_out = utils.tile(hf, 1, int(L/rnn.n_frame_samples))
+
             upper_tier_conditioning = self.run_rnn(
-                rnn, prev_samples, upper_tier_conditioning
+                rnn, prev_samples, hf_out, upper_tier_conditioning
             )
 
         bottom_frame_size = self.model.frame_level_rnns[0].frame_size
@@ -249,7 +339,7 @@ class Generator(Runner):
     def __call__(self, n_seqs, seq_len):
         # generation doesn't work with CUDNN for some reason
         torch.backends.cudnn.enabled = False
-
+        print("Me generating")
         self.reset_hidden_states()
 
         bottom_frame_size = self.model.frame_level_rnns[0].n_frame_samples
@@ -272,9 +362,27 @@ class Generator(Runner):
                 # )
                 with torch.no_grad():
                     prev_samples = (2 * utils.linear_dequantize(sequences[:, i - rnn.n_frame_samples : i], self.model.q_levels ).unsqueeze(1))
+
+
+                    [_,ind_,_] = prev_samples.size()
+
+                    hf_tensor = torch.zeros((n_seqs, ind_, self.model.M)).float()
+                    for s in range(n_seqs):
+                        for frm in range(ind_):
+                            if s == 0:
+                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
+                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.00339120439437788], dtype=torch.float64)
+                            elif s == 1:
+                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
+                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.0339120439437788], dtype=torch.float64)
+                            elif s == 2:
+                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
+                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.339120439437788], dtype=torch.float64)
+  
   
                 if self.cuda:
                     prev_samples = prev_samples.cuda()
+                    hf_tensor = hf_tensor.cuda()
 
                 if tier_index == len(self.model.frame_level_rnns) - 1:
                     upper_tier_conditioning = None
@@ -286,7 +394,7 @@ class Generator(Runner):
                                            .unsqueeze(1)
 
                 frame_level_outputs[tier_index] = self.run_rnn(
-                    rnn, prev_samples, upper_tier_conditioning
+                    rnn, prev_samples,hf_tensor, upper_tier_conditioning
                 )
 
             # prev_samples = torch.autograd.Variable(

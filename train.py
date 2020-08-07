@@ -56,7 +56,7 @@ default_params = {
 
 tag_params = [
     'exp', 'frame_sizes', 'n_rnn', 'dim', 'learn_h0', 'q_levels', 'seq_len',
-    'batch_size', 'dataset', 'val_frac', 'test_frac'
+    'batch_size', 'dataset', 'val_frac', 'test_frac', 'M'
 ]
 
 def param_to_string(value):
@@ -169,6 +169,7 @@ def main(exp, frame_sizes, dataset, **params):
         **params
     )
 
+
     results_path = setup_results_dir(params)
     tee_stdout(os.path.join(results_path, 'log'))
 
@@ -178,7 +179,8 @@ def main(exp, frame_sizes, dataset, **params):
         dim=params['dim'],
         learn_h0=params['learn_h0'],
         q_levels=params['q_levels'],
-        weight_norm=params['weight_norm']
+        weight_norm=params['weight_norm'],
+        M=params['M']
     )
     predictor = Predictor(model)
     if params['cuda']:
@@ -351,6 +353,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--cuda', type=parse_bool,
         help='whether to use CUDA'
+    )
+    parser.add_argument(
+        '--M', type=int,
+        help='LPC filter order for conditioning'
     )
     parser.add_argument(
         '--comet_key', help='comet.ml API key'
