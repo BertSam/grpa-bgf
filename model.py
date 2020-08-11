@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from torch.nn import init
 
 import numpy as np
+#import matplotlib.pyplot as plt
 
 
 
@@ -31,7 +32,7 @@ class SampleRNN(torch.nn.Module):
         ])
 
         self.sample_level_mlp = SampleLevelMLP(
-            frame_sizes[0], dim, q_levels, weight_norm
+            frame_sizes[0], dim, q_levels, weight_norm, M
         )
 
     @property
@@ -157,10 +158,11 @@ class FrameLevelRNN(torch.nn.Module):
 
 class SampleLevelMLP(torch.nn.Module):
 
-    def __init__(self, frame_size, dim, q_levels, weight_norm):
+    def __init__(self, frame_size, dim, q_levels, weight_norm, M):
         super().__init__()
 
         self.q_levels = q_levels
+        self.M = M
 
         self.embedding = torch.nn.Embedding(
             self.q_levels,
@@ -176,6 +178,20 @@ class SampleLevelMLP(torch.nn.Module):
         init.kaiming_uniform_(self.input.weight)
         if weight_norm:
             self.input = torch.nn.utils.weight_norm(self.input)
+
+        #################
+        self.cond_expand = torch.nn.Conv1d(
+            in_channels=M,
+            out_channels=dim,
+            kernel_size=1
+        )
+        init.kaiming_uniform_(self.cond_expand.weight) # according to user warning (BGF 2020)
+        #init.kaiming_uniform(self.cond_expand.weight) 
+        init.constant_(self.cond_expand.bias, 0) # according to user warning (BGF 2020)
+        #init.constant(self.cond_expand.bias, 
+        if weight_norm:
+            self.cond_expand = torch.nn.utils.weight_norm(self.cond_expand)
+        ################
 
         self.hidden = torch.nn.Conv1d(
             in_channels=dim,
@@ -197,7 +213,7 @@ class SampleLevelMLP(torch.nn.Module):
         if weight_norm:
             self.output = torch.nn.utils.weight_norm(self.output)
 
-    def forward(self, prev_samples, upper_tier_conditioning):
+    def forward(self, prev_samples, hf, upper_tier_conditioning):
         (batch_size, _, _) = upper_tier_conditioning.size()
 
         prev_samples = self.embedding(
@@ -208,8 +224,9 @@ class SampleLevelMLP(torch.nn.Module):
 
         prev_samples = prev_samples.permute(0, 2, 1)
         upper_tier_conditioning = upper_tier_conditioning.permute(0, 2, 1)
+        hf = hf.permute(0, 2, 1)
 
-        x = F.relu(self.input(prev_samples) + upper_tier_conditioning)
+        x = F.relu(self.input(prev_samples) + upper_tier_conditioning + self.cond_expand(hf))
         x = F.relu(self.hidden(x))
         x = self.output(x).permute(0, 2, 1).contiguous()
 
@@ -268,11 +285,15 @@ class Predictor(Runner, torch.nn.Module):
 
         bottom_frame_size = self.model.frame_level_rnns[0].frame_size
 
-        mlp_input_sequences = input_sequences \
-            [:, self.model.lookback - bottom_frame_size :]
+        # print(bottom_frame_size)
+        # exit()
+
+        mlp_input_sequences = input_sequences[:, self.model.lookback - bottom_frame_size :]
+
+        hf_out = utils.tile(hf, 1, int(self.model.lookback))
 
         return self.model.sample_level_mlp(
-            mlp_input_sequences, upper_tier_conditioning
+            mlp_input_sequences, hf_out, upper_tier_conditioning
         )
 
 
@@ -316,14 +337,20 @@ class Generator(Runner):
                     for s in range(n_seqs):
                         for frm in range(ind_):
                             if s == 0:
-                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
-                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.00339120439437788], dtype=torch.float64)
+                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 100, 1], dtype=torch.float64)
                             elif s == 1:
-                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
-                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.0339120439437788], dtype=torch.float64)
+                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 200, 1], dtype=torch.float64)
                             elif s == 2:
-                                hf_tensor[s, frm, :] = torch.tensor([0.202038314729498,	0.259133820904786,	0.650005536799759,	0.774293997015348,	1.15643122931357,\
-                                	                            1.40107779574558,	1.67377481530053,	2.00228013396680,	2.37544570740133,	2.85229620658522, 0.339120439437788], dtype=torch.float64)
+                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 400, 1], dtype=torch.float64)
+                            elif s == 3:
+                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.0339120439437788, 200, 1], dtype=torch.float64)
+                            elif s == 3:
+                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.339120439437788, 200, 1], dtype=torch.float64)
   
   
                 if self.cuda:
@@ -339,14 +366,10 @@ class Generator(Runner):
                         frame_level_outputs[tier_index + 1][:, frame_index, :] \
                                            .unsqueeze(1)
 
+                print(prev_samples.size())
                 frame_level_outputs[tier_index] = self.run_rnn(
                     rnn, prev_samples,hf_tensor, upper_tier_conditioning
                 )
-
-            # prev_samples = torch.autograd.Variable(
-            #     sequences[:, i - bottom_frame_size : i],
-            #     volatile=True
-            # )
 
             with torch.no_grad():
                 prev_samples = sequences[:, i - bottom_frame_size : i]
@@ -356,6 +379,7 @@ class Generator(Runner):
             upper_tier_conditioning = \
                 frame_level_outputs[0][:, i % bottom_frame_size, :] \
                                       .unsqueeze(1)
+            print(prev_samples.size())
             sample_dist = self.model.sample_level_mlp(
                 prev_samples, upper_tier_conditioning
             ).squeeze(1).exp_().data
