@@ -7,13 +7,7 @@ from torch.nn import init
 
 import numpy as np
 
-import librosa
-import math
-import scipy
-from scipy.signal import lfilter
-#import matplotlib.pyplot as plt
-from spectrum import poly2lsf, lsf2poly
-import pyworld as pw
+
 
 
 class SampleRNN(torch.nn.Module):
@@ -264,64 +258,16 @@ class Predictor(Runner, torch.nn.Module):
             )
 
             if upper_tier_conditioning == None:
-                [N, C, L] = prev_samples.size()
-                hf = torch.zeros([N, C, self.model.M]) # + 1 (for the rms nrj)
-
-                for batch_ind in range(N):
-                    for frame_ind in range(C):
-                        temp_seq = prev_samples[batch_ind, frame_ind, :].cpu().numpy()
-
-                        # Calculs lsf
-                        # Calcul du bruit blanc gaussien à ajouter au signal pour éviter "ill-conditioned" matrix
-                        # rms = np.sqrt(np.mean(temp_seq**2))
-                        # print(rms)
-                        # n_next = 1
-                        # if rms == 0:
-                        #     while rms == 0:
-                        #         temp_seq = prev_samples[batch_ind, frame_ind+n_next, :].cpu().numpy()
-                        #         rms = np.sqrt(np.mean(temp_seq**2))
-                        #         n_next += 1
-                        #         print("flag")
-
-                        rms = 0.1
-                        var = rms * 0.0001 # (-40db)
-                        std = math.sqrt(var)
-                        mu, sigma = 0, std # mean = 0 and standard deviation
-
-                        temp_seq = temp_seq + np.random.normal(mu, sigma, L)
-                    
-                        # hanning windowing
-                        temp_seq = temp_seq*np.hanning(L)
-
-                        a = librosa.core.lpc(temp_seq, self.model.M-1)
-                        lsf = torch.from_numpy(np.asarray(poly2lsf(a)))
-
-                        # Calculs nrj
-                        residu = lfilter(a, 1, temp_seq)
-                        nrjRMS_residu = torch.from_numpy(np.asarray(np.sqrt(np.mean(residu**2))))
-
-                        # print(lsf)
-                        # print(nrjRMS_residu)
-
-                        hf[batch_ind, frame_ind, :-1] = lsf
-                        hf[batch_ind, frame_ind, -1] = nrjRMS_residu
-                        # print(hf[0, 0, :])
-                        # exit()
-
-                hf = hf.cuda()
-                # import sys
-                # torch.set_printoptions(threshold=sys.maxsize)
-                # print(hf)
-                # exit()
-
-            
-            hf_out = utils.tile(hf, 1, int(L/rnn.n_frame_samples))
+                hf = utils.vocoder(prev_samples, self.model.M)
+  
+            hf_out = utils.tile(hf, 1, int(self.model.lookback/rnn.n_frame_samples))
 
             upper_tier_conditioning = self.run_rnn(
                 rnn, prev_samples, hf_out, upper_tier_conditioning
             )
 
         bottom_frame_size = self.model.frame_level_rnns[0].frame_size
+
         mlp_input_sequences = input_sequences \
             [:, self.model.lookback - bottom_frame_size :]
 
