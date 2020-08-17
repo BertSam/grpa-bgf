@@ -1,26 +1,18 @@
-# samplernn-pytorch
+# samplernn-pytorch avec conditionnement (Implémentation GRPA)
 
-A PyTorch implementation of [SampleRNN: An Unconditional End-to-End Neural Audio Generation Model](https://arxiv.org/abs/1612.07837).
+Une implementation PyTorch de [SampleRNN: An Unconditional End-to-End Neural Audio Generation Model](https://arxiv.org/abs/1612.07837). Incluant une première tentative de conditionnement paramètriques semblable à [High-quality speech coding with SampleRNN](https://arxiv.org/abs/1811.03021)
 
-![A visual representation of the SampleRNN architecture](http://deepsound.io/images/samplernn.png)
-
-It's based on the reference implementation in Theano: https://github.com/soroushmehr/sampleRNN_ICLR2017. Unlike the Theano version, our code allows training models with arbitrary number of tiers, whereas the original implementation allows maximum 3 tiers. However it doesn't allow using LSTM units (only GRU). For more details and motivation behind rewriting this model to PyTorch, see our blog post: http://deepsound.io/samplernn_pytorch.html.
+Le code de base est tiré de [samplernn-pytorch](https://github.com/deepsound-project/samplernn-pytorch)
 
 ## Dependencies
 
-This code requires Python 3.5+ and PyTorch 0.1.12+. Installation instructions for PyTorch are available on their website: http://pytorch.org/. You can install the rest of the dependencies by running `pip install -r requirements.txt`.
+Ce code nécessite Python 3.5+ and PyTorch 0.1.12+. Les instructions d'installation de PyTorch sont disponibles sur leur site Web: http://pytorch.org. Aussi, pour l'entrainement sur GPU il est recommandé d'installer le [cuda toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html) et d'avoir les pilots NVIDIA fonctionnels.
+
+Vous pouvez créer l'environnement avec les dépendences nécéssaires avec la commande: `conda env create -f environment.yml`
 
 ## Datasets
 
-We provide a script for creating datasets from YouTube single-video mixes. It downloads a mix, converts it to wav and splits it into equal-length chunks. To run it you need youtube-dl (a recent version; the latest version from pip should be okay) and ffmpeg. To create an example dataset - 4 hours of piano music split into 8 second chunks, run:
-
-```
-cd datasets
-./download-from-youtube.sh "https://www.youtube.com/watch?v=EhO_MrRfftU" 8 piano
-```
-
-You can also prepare a dataset yourself. It should be a directory in `datasets/` filled with equal-length wav files. Or you can create your own dataset format by subclassing `torch.utils.data.Dataset`. It's easy, take a look at `dataset.FolderDataset` in this repo for an example.
-
+Les fichiers audio utilisés pour l'entrainement doivent être dans le dossiers `./datasets/YOUR_DATASET`
 ## Training
 
 To train the model you need to run `train.py`. All model hyperparameters are settable in the command line. Most hyperparameters have sensible default values, so you don't need to provide all of them. Run `python train.py -h` for details. To train on the `piano` dataset using the best hyperparameters we've found, run:
