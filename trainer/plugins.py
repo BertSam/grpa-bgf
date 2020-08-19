@@ -154,6 +154,9 @@ class GeneratorPlugin(Plugin):
     def register(self, trainer):
         self.generate = Generator(trainer.model.model, trainer.cuda)
 
+    def register_generate(self, model, cuda):
+        self.generate = Generator(model, cuda)
+
     def epoch(self, epoch_index):
         samples = self.generate(self.n_samples, self.sample_length) \
                       .cpu().float().numpy()

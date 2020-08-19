@@ -9,6 +9,7 @@ from scipy.signal import lfilter
 #import matplotlib.pyplot as plt
 from spectrum import poly2lsf, lsf2poly
 import pyworld as pw
+import sklearn.preprocessing as skl
 
 
 EPSILON = 1e-2
@@ -76,19 +77,31 @@ def vocoder(prev_samples, M):
             temp_seq = temp_seq + np.random.normal(mu, sigma, L)
         
             # hanning windowing
-            temp_seq = temp_seq*np.hanning(L)
+            temp_seq_han = temp_seq*np.hanning(L)
 
-            a = librosa.core.lpc(temp_seq, M-3)  # lpc of order M-3 
+            a = librosa.core.lpc(temp_seq_han, M-3)  # lpc of order M-3 
             lsf = torch.from_numpy(np.asarray(poly2lsf(a)))
 
             # Calculs nrj
             residu = lfilter(a, 1, temp_seq)
             nrjRMS_residu = torch.from_numpy(np.asarray(np.sqrt(np.mean(residu**2))))
 
+
+
             # Calculs Voising flag
+            temp_seq_voicing = temp_seq - temp_seq.mean(axis=0) 
+            #temp_seq_voicing = temp_seq_voicing / np.abs(temp_seq_voicing).max(axis=0)
+            zero_crossings_counter = len(np.where(np.diff(np.sign(temp_seq_voicing)))[0])
             voice_flag = torch.tensor([0])
-            if pitch[frame_ind] >= 50 and pitch[frame_ind] <= 300: # condition for 
+            if zero_crossings_counter <= 30 and zero_crossings_counter >= 8 and pitch[frame_ind] >= 50 and pitch[frame_ind] <= 400:
                 voice_flag = torch.tensor([1])
+
+            #print(voice_flag)  
+            # plt.plot(temp_seq_voicing)
+            # plt.title(voice_flag)
+            # plt.ylim((-1, 1))
+            # plt.show()     
+
 
             hf[batch_ind, frame_ind, :-3] = lsf
             hf[batch_ind, frame_ind, -3] = nrjRMS_residu

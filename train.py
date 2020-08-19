@@ -51,7 +51,8 @@ default_params = {
     'sample_length': 80000,
     'loss_smoothing': 0.99,
     'cuda': True,
-    'comet_key': None
+    'comet_key': None,
+    'M': 13                     # Filtre LPC d'ordre 10 avec 3 autres paramêtre (nrj, pitch, voisement) par défault (BGF 20-08-18)
 }
 
 tag_params = [
@@ -144,11 +145,13 @@ def make_data_loader(overlap_len, params):
         )
     return data_loader
 
+
+# Intégration de comet-ml (BGF 20-08-18)
 def init_comet(params, trainer):
     if params['comet_key'] is not None:
         from comet_ml import Experiment
         from trainer.plugins import CometPlugin
-        experiment = Experiment(api_key=params['comet_key'], log_code=False)
+        experiment = Experiment(api_key=params['comet_key'], log_code=False, )
         hyperparams = {
             name: param_to_string(params[name]) for name in tag_params
         }
@@ -173,6 +176,7 @@ def main(exp, frame_sizes, dataset, **params):
     results_path = setup_results_dir(params)
     tee_stdout(os.path.join(results_path, 'log'))
 
+
     model = SampleRNN(
         frame_sizes=params['frame_sizes'],
         n_rnn=params['n_rnn'],
@@ -180,7 +184,7 @@ def main(exp, frame_sizes, dataset, **params):
         learn_h0=params['learn_h0'],
         q_levels=params['q_levels'],
         weight_norm=params['weight_norm'],
-        M=params['M']
+        M=params['M']                          # Intégration de M au modèle (BGF 20-08-18)                           
     )
     predictor = Predictor(model)
     if params['cuda']:
@@ -256,7 +260,7 @@ def main(exp, frame_sizes, dataset, **params):
         }
     ))
 
-    init_comet(params, trainer)
+    init_comet(params, trainer)             # Intégration de comet-ml (BGF 20-08-18)
 
     trainer.run(params['epoch_limit'])
 
