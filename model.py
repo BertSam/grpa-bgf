@@ -9,8 +9,6 @@ import numpy as np
 #import matplotlib.pyplot as plt
 
 
-
-
 class SampleRNN(torch.nn.Module):
 
     def __init__(self, frame_sizes, n_rnn, dim, learn_h0, q_levels, M,
@@ -57,7 +55,7 @@ class FrameLevelRNN(torch.nn.Module):
             self.h0 = torch.nn.Parameter(h0)
         else:
             #self.register_buffer('h0', torch.autograd.Variable(h0))
-            with torch.no_grad: # according to user warning (BGF 2020)
+            with torch.no_grad: # according to user warning (BGF 20-08-08)
                 self.register_buffer('h0', h0)
 
         self.input_expand = torch.nn.Conv1d(
@@ -65,27 +63,26 @@ class FrameLevelRNN(torch.nn.Module):
             out_channels=dim,
             kernel_size=1
         )
-        init.kaiming_uniform_(self.input_expand.weight) # according to user warning (BGF 2020)
+        init.kaiming_uniform_(self.input_expand.weight) # according to user warning (BGF 20-08-08)
         #init.kaiming_uniform(self.input_expand.weight) 
-        init.constant_(self.input_expand.bias, 0) # according to user warning (BGF 2020)
+        init.constant_(self.input_expand.bias, 0) # according to user warning (BGF 20-08-08)
         #init.constant(self.input_expand.bias, 
         if weight_norm:
             self.input_expand = torch.nn.utils.weight_norm(self.input_expand)
 
-
-        #################
+######################## Déclaration de l'objet de convolution 1D pour le redimensionnement du vecteur de conditionnement (BGF 20-08-18)########################
         self.cond_expand = torch.nn.Conv1d(
             in_channels=M,
             out_channels=dim,
             kernel_size=1
         )
-        init.kaiming_uniform_(self.cond_expand.weight) # according to user warning (BGF 2020)
+        init.kaiming_uniform_(self.cond_expand.weight) # according to user warning (BGF 20-08-08)
         #init.kaiming_uniform(self.cond_expand.weight) 
-        init.constant_(self.cond_expand.bias, 0) # according to user warning (BGF 2020)
+        init.constant_(self.cond_expand.bias, 0) # according to user warning (BGF 20-08-08)
         #init.constant(self.cond_expand.bias, 
         if weight_norm:
             self.cond_expand = torch.nn.utils.weight_norm(self.cond_expand)
-        ################
+################################################################################################################################################################
 
         self.rnn = torch.nn.GRU(
             input_size=dim,
@@ -129,16 +126,17 @@ class FrameLevelRNN(torch.nn.Module):
           prev_samples.permute(0, 2, 1)
         ).permute(0, 2, 1)
 
-        ##################
+######################### Redimensionnement du vecteur de conditionnement par convolution 1D (BGF 20-08-18) #########################
         input_cond = self.cond_expand(
           hf.permute(0, 2, 1)
         ).permute(0, 2, 1)
-        ##################
+
+        input = input + input_cond
+#####################################################################################################################################
 
         if upper_tier_conditioning is not None:
             input += upper_tier_conditioning
         
-        input += input_cond
 
         reset = hidden is None
 
@@ -163,7 +161,6 @@ class SampleLevelMLP(torch.nn.Module):
         super().__init__()
 
         self.q_levels = q_levels
-        #self.M = M
 
         self.embedding = torch.nn.Embedding(
             self.q_levels,
@@ -214,7 +211,7 @@ class SampleLevelMLP(torch.nn.Module):
         if weight_norm:
             self.output = torch.nn.utils.weight_norm(self.output)
 
-    def forward(self, prev_samples, upper_tier_conditioning): #orward(self, prev_samples, hf, upper_tier_conditioning):
+    def forward(self, prev_samples, upper_tier_conditioning): #forward(self, prev_samples, hf, upper_tier_conditioning):
         (batch_size, _, _) = upper_tier_conditioning.size()
 
         prev_samples = self.embedding(
@@ -233,7 +230,7 @@ class SampleLevelMLP(torch.nn.Module):
         x = self.output(x).permute(0, 2, 1).contiguous()
 
         return F.log_softmax(x.view(-1, self.q_levels), dim=1) \
-                .view(batch_size, -1, self.q_levels) ##### VÉRIFIER dim ##### IMPORTANT !!!
+                .view(batch_size, -1, self.q_levels) ##### VÉRIFIER impact de dim ##### IMPORTANT (BGF 20-08-18) 
 
 
 class Runner:
@@ -276,19 +273,19 @@ class Predictor(Runner, torch.nn.Module):
                 batch_size, -1, rnn.n_frame_samples
             )
 
+######################## Extraction des paramètres de conditionnement (BGF 20-08-18) ########################
             if upper_tier_conditioning == None:
-                hf = utils.vocoder(prev_samples, self.model.M)
+                hf = utils.vocoder(prev_samples, self.model.M)                          # Extraction sur les trames de l'étage le plus haut  
   
-            hf_out = utils.tile(hf, 1, int(self.model.lookback/rnn.n_frame_samples))
+            hf_out = utils.tile(hf, 1, int(self.model.lookback/rnn.n_frame_samples))    # Opération de carlage pour conhérence de la dimenssionalité temporelle (À CONFIRMER) (BGF 20-08-18)
+
+##############################################################################################################
 
             upper_tier_conditioning = self.run_rnn(
                 rnn, prev_samples, hf_out, upper_tier_conditioning
             )
 
         bottom_frame_size = self.model.frame_level_rnns[0].frame_size
-
-        # print(bottom_frame_size)
-        # exit()
 
         mlp_input_sequences = input_sequences[:, self.model.lookback - bottom_frame_size :]
 
@@ -308,7 +305,6 @@ class Generator(Runner):
     def __call__(self, n_seqs, seq_len):
         # generation doesn't work with CUDNN for some reason
         torch.backends.cudnn.enabled = False
-        print("Me generating")
         self.reset_hidden_states()
 
         bottom_frame_size = self.model.frame_level_rnns[0].n_frame_samples
@@ -322,42 +318,9 @@ class Generator(Runner):
                 if i % rnn.n_frame_samples != 0:
                     continue
 
-                # prev_samples = torch.autograd.Variable(
-                #     2 * utils.linear_dequantize(
-                #         sequences[:, i - rnn.n_frame_samples : i],
-                #         self.model.q_levels
-                #     ).unsqueeze(1),
-                #     volatile=True
-                # )
                 with torch.no_grad():
                     prev_samples = (2 * utils.linear_dequantize(sequences[:, i - rnn.n_frame_samples : i], self.model.q_levels ).unsqueeze(1))
-
-
-                    [_,ind_,_] = prev_samples.size()
-
-                    hf_tensor = torch.zeros((n_seqs, ind_, self.model.M)).float()
-                    for s in range(n_seqs):
-                        for frm in range(ind_):
-                            if s == 0:
-                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
-                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 100, 1], dtype=torch.float64)
-                            elif s == 1:
-                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
-                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 200, 1], dtype=torch.float64)
-                            elif s == 2:
-                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
-                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 400, 1], dtype=torch.float64)
-                            elif s == 3:
-                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
-                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.0339120439437788, 200, 1], dtype=torch.float64)
-                            elif s == 4:
-                                hf_tensor[s, frm, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
-                                	1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.339120439437788, 200, 1], dtype=torch.float64)
-  
-  
-                if self.cuda:
-                    prev_samples = prev_samples.cuda()
-                    hf_tensor = hf_tensor.cuda()
+                    
 
                 if tier_index == len(self.model.frame_level_rnns) - 1:
                     upper_tier_conditioning = None
@@ -368,9 +331,33 @@ class Generator(Runner):
                         frame_level_outputs[tier_index + 1][:, frame_index, :] \
                                            .unsqueeze(1)
 
-                #print(prev_samples.size())
+ ##################################### Déclaration des paramètres de conditionnement fixes pour la génération d'audio(BGF 20-08-18) #####################################
+                hf_tensor = torch.zeros((n_seqs, 1, self.model.M)).float()
+                if upper_tier_conditioning == None:
+                    for s in range(n_seqs):
+                        if s == 0:
+                            hf_tensor[s, 0, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 100, 1], dtype=torch.float64)
+                        elif s == 1:
+                            hf_tensor[s, 0, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 200, 1], dtype=torch.float64)
+                        elif s == 2:
+                            hf_tensor[s, 0, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.00339120439437788, 400, 1], dtype=torch.float64)
+                        elif s == 3:
+                            hf_tensor[s, 0, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.0339120439437788, 200, 1], dtype=torch.float64)
+                        elif s == 4:
+                            hf_tensor[s, 0, :] = torch.tensor([0.189863309598249,	0.274677483564359,	0.667983262332547,	0.807538797938067,	1.07955646433068,\
+                                1.42100190561771,	1.77148278120500,	2.12707515628060,	2.48821878508534,	2.81149305214963, 0.339120439437788, 200, 1], dtype=torch.float64)
+##########################################################################################################################################################################
+
+                if self.cuda:
+                    prev_samples = prev_samples.cuda()
+                    hf_tensor = hf_tensor.cuda()
+
                 frame_level_outputs[tier_index] = self.run_rnn(
-                    rnn, prev_samples,hf_tensor, upper_tier_conditioning
+                    rnn, prev_samples, hf_tensor, upper_tier_conditioning
                 )
 
             with torch.no_grad():
@@ -381,7 +368,7 @@ class Generator(Runner):
             upper_tier_conditioning = \
                 frame_level_outputs[0][:, i % bottom_frame_size, :] \
                                       .unsqueeze(1)
-            #print(prev_samples.size())
+
             sample_dist = self.model.sample_level_mlp(
                 prev_samples, upper_tier_conditioning  #prev_samples, hf_tensor, upper_tier_conditioning
             ).squeeze(1).exp_().data
